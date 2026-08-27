@@ -76,11 +76,11 @@ CREATE INDEX IF NOT EXISTS "connection_grant_delegations_company_agent_idx" ON "
 CREATE UNIQUE INDEX IF NOT EXISTS "connection_grant_delegations_grant_agent_uq" ON "connection_grant_delegations" USING btree ("grant_id","agent_id");
 --> statement-breakpoint
 -- A legacy company-scoped credential can only become user-scoped when exactly
--- one personal owner references it and no organization grant or connection
--- also references it. Ambiguous rows fail closed in-place: remove every live
--- reference, require reauthorization, and disable affected connections. This
--- keeps the instance bootable while ensuring the credential is never assigned
--- to an arbitrary user.
+-- one personal owner references it and no organization grant, connection, or
+-- company binding also references it. Ambiguous rows fail closed in-place:
+-- remove every personal-connection reference, require reauthorization, and
+-- disable affected connections. Company bindings keep the original
+-- company-scoped secret so their existing consumers continue to resolve it.
 DROP TABLE IF EXISTS "phase4_ambiguous_personal_secrets";
 --> statement-breakpoint
 CREATE TEMP TABLE "phase4_ambiguous_personal_secrets" ON COMMIT DROP AS
@@ -109,13 +109,19 @@ WITH personal_secret_owners AS (
 				AND organization_grant."kind" <> 'user'
 				AND organization_ref ->> 'secretId' = owners."secret_id"::text
 		)
-		OR EXISTS (
-			SELECT 1
-			FROM "tool_connections" connection
+			OR EXISTS (
+				SELECT 1
+				FROM "tool_connections" connection
 			CROSS JOIN LATERAL jsonb_array_elements(connection."credential_secret_refs") connection_ref
 			WHERE connection."company_id" = owners."company_id"
-				AND connection_ref ->> 'secretId' = owners."secret_id"::text
-		);
+					AND connection_ref ->> 'secretId' = owners."secret_id"::text
+			)
+			OR EXISTS (
+				SELECT 1
+				FROM "company_secret_bindings" binding
+				WHERE binding."company_id" = owners."company_id"
+					AND binding."secret_id" = owners."secret_id"
+			);
 --> statement-breakpoint
 WITH ambiguous_secrets AS (
 	SELECT "secret_id", "company_id" FROM "phase4_ambiguous_personal_secrets"
